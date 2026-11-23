@@ -1,0 +1,50 @@
+name: image
+# Every push to main builds the image for amd64 and arm64, pushes it to ghcr.io/nuit-cloud/postgres-image tagged 17.6-<run> and
+# sha-<commit>, and signs it by digest with keyless cosign, the same way the capabilities' images are signed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # the short-lived OIDC identity cosign signs with
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (and on main, push)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          sbom: true
+          provenance: mode=max
+          tags: |
+            ghcr.io/nuit-cloud/postgres-image:17.6-${{ github.run_number }}
+            ghcr.io/nuit-cloud/postgres-image:sha-${{ github.sha }}
+      - name: Install cosign v2.6.5 (from sigstore's own image, pinned by digest)
+        if: github.event_name == 'push'
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/bin"
+          c="$(docker create --platform linux/amd64 ghcr.io/sigstore/cosign/cosign:v2.6.5@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca)"
+          docker cp "$c:/ko-app/cosign" "$RUNNER_TEMP/bin/cosign" && docker rm "$c" >/dev/null
+          "$RUNNER_TEMP/bin/cosign" version >/dev/null && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Sign the image by digest
+        if: github.event_name == 'push'
+        run: cosign sign --yes "ghcr.io/nuit-cloud/postgres-image@${{ steps.build.outputs.digest }}"
+      - name: Say what was published
+        if: github.event_name == 'push'
+        run: echo "ghcr.io/nuit-cloud/postgres-image:17.6-${{ github.run_number }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
